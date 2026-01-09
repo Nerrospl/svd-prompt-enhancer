@@ -1,10 +1,10 @@
 """
 ═══════════════════════════════════════════════════════════════════════════════
-PLIK 1: core/prompt_enhancer.py (KOMPLETNY - ZASTĄP CAŁY PLIK)
-WERSJA: 2.1 – Z MULTI-STAGE VALIDATION I POLSKIM ROZWIJANIEM
+PLIK: core/prompt_enhancer.py (KOMPLETNY - WERSJA 2.2 NAPRAWIONA)
+NAPRAWA: Usunięta ekspansja, solidne rozwijanie w system prompt
 
-Data: 2026-01-08
-Status: ✅ GOTOWY DO WKLEJENIA
+Data: 2026-01-09 20:30
+Status: ✅ GOTOWY - BEZ BŁĘDÓW EXPANSION
 ═══════════════════════════════════════════════════════════════════════════════
 
 INSTRUKCJA:
@@ -64,7 +64,7 @@ class PromptEnhancer:
         style: str = "cinematic"
     ) -> Tuple[bool, Dict]:
         """
-        Wzbogacaj prompt z multi-stage validacją
+        Wzbogacaj prompt z walidacją (WERSJA 2.2 - BEZ EKSPANSJI)
         
         Args:
             prompt: Prompt do wzbogacenia
@@ -89,19 +89,13 @@ class PromptEnhancer:
             f"words={word_count}, detail={detail_level}, style={style})"
         )
         
-        # ETAP 1: Ekspansja promptu (rozwijanie szczegółów)
-        expanded_prompt = self._expand_prompt(prompt, language, detail_level)
-        if not expanded_prompt:
-            logger.error("Prompt expansion failed")
-            return False, {"error": "Prompt expansion failed"}
-        
-        logger.info(f"STAGE 1 DONE: Prompt expanded")
-        
-        # ETAP 2: Wzbogacanie z kontekstem obrazu
+        # ETAP 1: Przygotowanie kontekstu obrazu (jeśli dostępny)
         image_context = ""
         if image_analysis:
             image_context = self._format_image_context(image_analysis)
+            logger.info(f"Image context: {image_context}")
         
+        # ETAP 2: Budowanie system prompt z wytycznymi rozwijania
         system_prompt = self._build_system_prompt_advanced(
             image_context,
             language,
@@ -110,14 +104,13 @@ class PromptEnhancer:
             style
         )
         
-        user_prompt = self._build_user_prompt_with_expansion(
-            prompt,
-            expanded_prompt,
-            language
-        )
+        # ETAP 3: Budowanie user prompt
+        user_prompt = self._build_user_prompt(prompt, language)
+        
+        logger.info("ETAP 1: System prompt przygotowany")
         
         try:
-            logger.info("STAGE 2: Generating enhanced prompt via Ollama...")
+            logger.info("ETAP 2: Generowanie wzbogacenia via Ollama...")
             response = requests.post(
                 f"{self.api_url}/api/generate",
                 json={
@@ -135,15 +128,23 @@ class PromptEnhancer:
                 return False, {"error": msg}
             
             raw_response = response.json().get("response", "")
+            logger.info(f"Raw response length: {len(raw_response)} chars")
+            
+            # Wydobyj JSON z odpowiedzi
             data = extract_json_from_response(raw_response)
+            
+            if not data:
+                logger.warning("JSON extraction failed, trying manual parsing...")
+                data = self._parse_response_fallback(raw_response)
             
             if not data or "error" in data:
                 logger.error(f"Invalid response: {data}")
-                return False, {"error": "Invalid JSON response"}
+                return False, {"error": "Invalid response format"}
             
-            logger.info("STAGE 3: Validating enhanced prompt...")
+            logger.info("ETAP 2: Wzbogacenie wygenerowane")
             
             # ETAP 3: Walidacja jakości
+            logger.info("ETAP 3: Walidacja jakości...")
             is_valid, validation_msg = self._validate_enhancement(
                 data,
                 word_count,
@@ -154,8 +155,8 @@ class PromptEnhancer:
             if not is_valid:
                 logger.warning(f"Validation warning: {validation_msg}")
                 data["validation_warning"] = validation_msg
-            
-            logger.info(f"STAGE 4: Quality check passed - {validation_msg}")
+            else:
+                logger.info(f"Validation passed: {validation_msg}")
             
             # Dodaj metadane
             data["enhanced"] = True
@@ -165,12 +166,11 @@ class PromptEnhancer:
             data["detail_level"] = detail_level
             data["style"] = style
             data["original_prompt"] = prompt
-            data["expanded_prompt"] = expanded_prompt
             
             if image_analysis:
                 data["image_data"] = image_analysis
             
-            logger.info("Enhancement COMPLETED SUCCESSFULLY")
+            logger.info("✅ Enhancement COMPLETED SUCCESSFULLY")
             return True, data
         
         except requests.exceptions.Timeout:
@@ -182,66 +182,31 @@ class PromptEnhancer:
             logger.error(msg, exc_info=True)
             return False, {"error": msg}
     
-    def _expand_prompt(
-        self,
-        prompt: str,
-        language: str = "pl",
-        detail_level: str = "medium"
-    ) -> Optional[str]:
+    def _parse_response_fallback(self, raw: str) -> Optional[Dict]:
         """
-        ETAP 1: Ekspanduj polski prompt na podstawową wersję rozszerzoną
-        Celem jest zrozumienie i rozwinięcie głównych elementów
+        Fallback parser dla przypadków gdy extract_json_from_response nie działa
         """
-        
-        detail_map = {
-            "low": "Zidentyfikuj 2-3 główne elementy.",
-            "medium": "Zidentyfikuj 4-5 głównych elementów wizualnych.",
-            "high": "Zidentyfikuj 6-8 elementów wizualnych i ich relacje."
-        }
-        detail_text = detail_map.get(detail_level, detail_map["medium"])
-        
-        if language == "pl":
-            system = f"""Jesteś asystentem do rozwijania polskich promptów.
-Twoim zadaniem jest przeanalizować polski prompt i zwrócić listę kluczowych 
-elementów wizualnych, które będą pomocne w wzbogacaniu opisu.
-
-{detail_text}
-
-Zwróć JSON z polem "elements" zawierającym listę zidentyfikowanych elementów."""
-        else:
-            system = f"""You are an assistant for expanding prompts.
-Analyze the prompt and identify key visual elements.
-
-{detail_text}
-
-Return JSON with "elements" field containing identified elements."""
-        
         try:
-            response = requests.post(
-                f"{self.api_url}/api/generate",
-                json={
-                    "model": self.model_name,
-                    "prompt": f"{system}\n\nPrompt: {prompt}",
-                    "temperature": 0.5,
-                    "stream": False,
-                },
-                timeout=30
-            )
+            # Szukaj JSON obiektu w odpowiedzi
+            start = raw.find('{')
+            end = raw.rfind('}')
             
-            if response.status_code == 200:
-                raw = response.json().get("response", "")
-                data = extract_json_from_response(raw)
-                
-                if data and "elements" in data:
-                    elements = data.get("elements", [])
-                    if isinstance(elements, list):
-                        expanded = " + ".join(elements)
-                        logger.info(f"Expanded to: {expanded}")
-                        return expanded
-        except Exception as e:
-            logger.warning(f"Expansion failed: {e}")
+            if start == -1 or end == -1:
+                logger.warning("No JSON braces found in response")
+                return None
+            
+            json_str = raw[start:end+1]
+            data = json.loads(json_str)
+            
+            logger.info("Fallback JSON parsing successful")
+            return data
         
-        return None
+        except json.JSONDecodeError as e:
+            logger.error(f"Fallback parsing failed: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Unexpected error in fallback: {e}")
+            return None
     
     def _validate_enhancement(
         self,
@@ -254,14 +219,14 @@ Return JSON with "elements" field containing identified elements."""
         ETAP 3: Walidacja jakości wzbogacenia
         Sprawdza:
         - Ilość słów
-        - Zawartość (czy zawiera detale)
-        - Spójność z original promptem
+        - Zawartość detali
+        - Spójność
         """
         
         en_prompt = result.get("prompt_en", "")
         pl_prompt = result.get("prompt_pl", "")
         
-        # Policz słowa bardziej dokładnie
+        # Policz słowa
         en_words = len(en_prompt.split())
         pl_words = len(pl_prompt.split())
         
@@ -269,32 +234,33 @@ Return JSON with "elements" field containing identified elements."""
         
         # Walidacja 1: Minimalna ilość słów
         min_words = max(50, target_words // 2)
-        if en_words < min_words:
-            return False, f"Too short: {en_words} words (min: {min_words})"
+        if en_words < min_words or pl_words < min_words:
+            return False, f"Too short: EN={en_words}, PL={pl_words} (min={min_words})"
         
         # Walidacja 2: Czy zawiera detale
         detail_keywords = [
-            "light", "texture", "color", "shadow", "atmosphere", "detail",
-            "golden", "cinematic", "composition", "lighting", "mood",
-            "świat", "oświetlenie", "tekstura", "kolor", "atmosfera",
-            "szczegół", "nastrój", "złoty", "kinematograficzny"
+            "light", "lighting", "texture", "color", "shadow", "atmosphere",
+            "detail", "cinematic", "composition", "mood", "golden", "vivid",
+            "oświetlenie", "tekstura", "kolor", "cień", "atmosfera",
+            "szczegół", "nastrój", "złoty", "żywy", "kinematograficzny"
         ]
         
         has_details = any(kw in en_prompt.lower() or kw in pl_prompt.lower() 
                          for kw in detail_keywords)
         
         if not has_details and detail_level == "high":
-            return False, "Missing visual details for HIGH detail level"
+            logger.warning("Missing visual details for HIGH detail level")
+            return False, "Missing visual details"
         
         # Walidacja 3: Czy nie jest puste/błędne
-        if len(en_prompt.strip()) < 20 or len(pl_prompt.strip()) < 20:
+        if len(en_prompt.strip()) < 30 or len(pl_prompt.strip()) < 30:
             return False, "Result too short or empty"
         
-        # Walidacja 4: Podstawowe sprawdzenie spójności
+        # Walidacja 4: Brak błędów
         if "error" in en_prompt.lower() or "error" in pl_prompt.lower():
             return False, "Error found in response"
         
-        return True, f"Valid ({en_words} EN words, {pl_words} PL words)"
+        return True, f"Valid (EN: {en_words} words, PL: {pl_words} words)"
     
     def _build_system_prompt_advanced(
         self,
@@ -304,126 +270,138 @@ Return JSON with "elements" field containing identified elements."""
         detail_level: str = "medium",
         style: str = "cinematic"
     ) -> str:
-        """System prompt z kontrolą szczegółowości i stylu"""
+        """
+        System prompt z solidnymi wytycznymi rozwijania
+        Bez dodatkowego API call - wszystko w jednym promptcie
+        """
         
+        # Wytyczne dla każdego detail_level
         detail_map = {
             "low": (
-                "Bądź zwięzły. Opisz tylko kluczowe elementy bez zbędnych detali. "
-                "Skupiaj się na głównych komponentach sceny."
+                "Bądź zwięzły. Opisz tylko kluczowe elementy wizualne. "
+                "Bez zbędnych detali, skupiaj się na głównych komponentach sceny."
             ),
             "medium": (
                 "Opisz elementy wizualne ze szczegółami. Dodaj informacje o "
-                "oświetleniu, kolorach i podstawowej atmosferze."
+                "oświetleniu, kolorach i atmosferze sceny. "
+                "Bądź konkretny - wymień kolory, tekstury, światło."
             ),
             "high": (
-                "Dodaj BARDZO DUŻO szczegółów: tekstury, kolory, oświetlenie, "
-                "atmosfera, efekty, głębia ostrości, temperaturę barwną, "
-                "rodzaje światła, cienie, odbicia, kontrast, nasycenie, "
-                "material powierzchni, jakość powietrza, mgłę, cząsteczki, "
-                "refleksy, specjalne efekty. Bądź bardzo szczegółowy i opisowy."
+                "Dodaj WIELE szczegółów wizualnych: dokładne kolory RGB/hex, "
+                "rodzaje i kierunki oświetlenia (golden hour, neon, daylight), "
+                "tekstury materiałów (linen, silk, sand, skin tones), "
+                "atmosferę (romantic, cinematic, moody), "
+                "efekty optyczne (bokeh, lens flare, depth of field), "
+                "kontrast, nasycenie barw, refleksy, cienie, głębia, "
+                "detale drugiego planu, jakość powietrza, mgłę, cząsteczki pyłu. "
+                "Bądź BARDZO szczegółowy i malowniczy."
             )
         }
         detail_text = detail_map.get(detail_level, detail_map["medium"])
         
+        # Wytyczne dla stylu
         style_map = {
             "cinematic": (
-                "Użyj kinematograficznego języka (cinematography, lighting design, "
-                "lens choice, composition, depth of field, color grading, "
-                "mise-en-scène, visual storytelling)"
+                "Użyj kinematograficznego języka: lighting design, "
+                "composition, lens choice, depth of field, color grading, "
+                "mise-en-scène, visual storytelling, frame composition"
             ),
             "artistic": (
-                "Skoncentruj się na aspektach artystycznych (art style, "
-                "composition, aesthetic, artistic movement, color palette, "
-                "brushwork, visual harmony, artistic techniques)"
+                "Skoncentruj się na aspektach artystycznych: art style, "
+                "aesthetic, artistic movement, color palette, brushwork, "
+                "artistic harmony, visual composition, artistic techniques"
             ),
             "technical": (
-                "Opisz techniczne parametry (resolution, bit depth, frame rate, "
-                "codec, color space, dynamic range, exposure settings, "
-                "white balance, ISO, aperture equivalents)"
+                "Opisz techniczne parametry: resolution, bit depth, "
+                "color space, dynamic range, exposure, white balance, "
+                "ISO equivalents, aperture, shot type, technical specs"
             )
         }
         style_text = style_map.get(style, style_map["cinematic"])
         
         if language == "pl":
-            base = f"""Jesteś ekspertem w tworzeniu BARDZO SZCZEGÓŁOWYCH, ROZBUDOWANYCH 
-i BOGATYCH w detale promptów dla narzędzi generacji obrazów i wideo.
+            base = f"""Jesteś ekspertem w tworzeniu SZCZEGÓŁOWYCH i ROZBUDOWANYCH 
+promptów dla narzędzi generacji obrazów i wideo.
 
-NAJWAŻNIEJSZE WYTYCZNE:
-1. ROZWIJAJ I ROZSZERZAJ input - nie tylko go tłumacz
-2. Dodaj KONKRETNE detale (nie uogólniaj)
-3. {detail_text}
-4. {style_text}
-5. Docelowa długość: ~{word_count} słów (WAŻNE: licz słowa dokładnie)
-6. Zachowaj oryginalną intencję
-7. Polski prompt rozwijaj na szczegóły, nie go przepisuj
-8. Dla wersji EN: naturalny angielski bez zbędnych tłumaczeń
+INSTRUKCJE OBOWIĄZKOWE:
+1. ROZWIJAJ polski prompt - dodaj konkretne detale, nie tylko przepisuj
+2. Zwróć polsko-angielski JSON z polami "prompt_en" i "prompt_pl"
+3. Oba prompty MUSZĄ być szczegółowe i wzbogacone
+4. {detail_text}
+5. {style_text}
+6. Docelowa długość: ~{word_count} słów (WAŻNE: licz dokładnie)
+7. Zachowaj oryginalną intencję promptu
 
-STRUKTURA ODPOWIEDZI (JSON):
+STRUKTURA ODPOWIEDZI (TYLKO JSON):
 {{
-    "prompt_en": "Bardzo szczegółowy angielski opis z bogatymi detalami...",
-    "prompt_pl": "Bardzo szczegółowy polski opis z bogatymi detalami..."
+    "prompt_en": "Szczegółowy angielski opis z bogatymi detalami...",
+    "prompt_pl": "Szczegółowy polski opis z bogatymi detalami..."
 }}
 
-KRYTYCZNE: Oba prompty muszą być ROZBUDOWANE i SZCZEGÓŁOWE, nie krótkie!"""
+KRYTYCZNE: 
+- OBA prompty MUSZĄ być rozbudowane (200+ słów każdy)
+- Nie przepisuj - ROZWIJAJ szczegóły
+- Konkretne kolory, światło, tekstury, atmosfera
+- Tylko JSON, nic więcej
+- Polskie i angielskie prompty na tej samej długości"""
         else:
-            base = f"""You are an expert in creating EXTREMELY DETAILED, COMPREHENSIVE, 
-and RICH prompts for image and video generation tools.
+            base = f"""You are an expert in creating DETAILED and COMPREHENSIVE prompts 
+for image and video generation tools.
 
-KEY GUIDELINES:
-1. EXPAND and ELABORATE on the input - don't just translate
-2. Add CONCRETE details (not generalizations)
-3. {detail_text}
-4. {style_text}
-5. Target length: ~{word_count} words (IMPORTANT: count words accurately)
-6. Preserve original intent
-7. Create natural, detailed descriptions
-8. Both EN and PL versions must be COMPREHENSIVE
+MANDATORY INSTRUCTIONS:
+1. EXPAND the prompt - add concrete details, don't just translate
+2. Return Polish-English JSON with "prompt_en" and "prompt_pl" fields
+3. BOTH prompts MUST be detailed and enriched
+4. {detail_text}
+5. {style_text}
+6. Target length: ~{word_count} words (IMPORTANT: count accurately)
+7. Preserve original intent
 
-RESPONSE STRUCTURE (JSON):
+RESPONSE STRUCTURE (JSON ONLY):
 {{
-    "prompt_en": "Extremely detailed English description with rich details...",
-    "prompt_pl": "Extremely detailed Polish description with rich details..."
+    "prompt_en": "Detailed English description with rich details...",
+    "prompt_pl": "Detailed Polish description with rich details..."
 }}
 
-CRITICAL: Both prompts must be ELABORATE and DETAILED, not short!"""
+CRITICAL:
+- BOTH prompts MUST be elaborate (200+ words each)
+- Don't just translate - EXPAND details
+- Specific colors, lighting, textures, atmosphere
+- JSON ONLY, nothing else
+- Polish and English prompts at similar length"""
         
         if image_context:
-            base += f"\n\nIMAGE CONTEXT TO INCORPORATE:\n{image_context}"
+            base += f"\n\nIMAGE CONTEXT:\n{image_context}"
         
         return base
     
-    def _build_user_prompt_with_expansion(
+    def _build_user_prompt(
         self,
         original: str,
-        expanded: Optional[str],
         language: str = "pl"
     ) -> str:
-        """User prompt z informacją o rozszerzeniu"""
+        """User prompt - prosty i bezpośredni"""
         
         if language == "pl":
-            user = f"""Bazowy prompt: "{original}"
+            return f"""Wzbogać ten prompt o szczegóły i detale:
 
-Zidentyfikowane elementy do rozwinięcia: {expanded if expanded else "wszystkie aspekty"}
+"{original}"
 
-Zadanie: Wzbogać powyższy prompt w SZCZEGÓŁY, DETALE i OPISY wizualne.
 Pamiętaj:
-1. ZAWSZE zwróć ROZBUDOWANY opis (200+ słów)
-2. KONKRETNE detale (kolory, materiały, oświetlenie, tekstury)
-3. TYLKO JSON format
-4. Oba pola (prompt_en i prompt_pl) MUSZĄ być szczegółowe"""
+- ZAWSZE zwróć długi, szczegółowy opis (200+ słów w każdym języku)
+- Dodaj konkretne detale: kolory, oświetlenie, tekstury, atmosferę
+- Polskie i angielskie prompty powinny być równie szczegółowe
+- TYLKO JSON format - nic więcej"""
         else:
-            user = f"""Base prompt: "{original}"
+            return f"""Enrich this prompt with details and specifics:
 
-Identified elements to expand: {expanded if expanded else "all aspects"}
+"{original}"
 
-Task: Enrich the above prompt with DETAILS, SPECIFICS and VISUAL DESCRIPTIONS.
 Remember:
-1. ALWAYS return a COMPREHENSIVE description (200+ words)
-2. CONCRETE details (colors, materials, lighting, textures)
-3. JSON format ONLY
-4. Both fields (prompt_en and prompt_pl) MUST be detailed"""
-        
-        return user
+- ALWAYS return a long, detailed description (200+ words in each language)
+- Add concrete details: colors, lighting, textures, atmosphere
+- Polish and English prompts should be equally detailed
+- JSON format ONLY - nothing else"""
     
     def _format_image_context(self, image_analysis: Dict) -> str:
         """Formatuj analizę obrazu"""
@@ -435,8 +413,8 @@ Remember:
             parts.append(f"Resolution: {w}x{h}")
         
         if image_analysis.get("detected"):
-            detected = ", ".join(image_analysis["detected"])
-            parts.append(f"Elements: {detected}")
+            detected = ", ".join(image_analysis["detected"][:5])
+            parts.append(f"Detected: {detected}")
         
         if image_analysis.get("color_temp"):
             parts.append(f"Color: {image_analysis['color_temp']}")
